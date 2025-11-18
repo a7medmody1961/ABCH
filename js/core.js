@@ -14,6 +14,26 @@ import { calibrate_range } from './modals/calib-range-modal.js';
 // Application State - manages app-wide state and UI
 const app = {
   // Button disable state management
+  disable_btn: 0,'use strict';
+
+import { sleep, float_to_str, dec2hex, dec2hex32, lerp_color, initAnalyticsApi, la, createCookie, readCookie } from './utils.js';
+import { initControllerManager } from './controller-manager.js';
+import ControllerFactory from './controllers/controller-factory.js';
+import { lang_init, l } from './translations.js';
+import { loadAllTemplates } from './template-loader.js';
+import { draw_stick_position, CIRCULARITY_DATA_SIZE } from './stick-renderer.js';
+import { ds5_finetune, isFinetuneVisible, finetune_handle_controller_input } from './modals/finetune-modal.js';
+import { calibrate_stick_centers, auto_calibrate_stick_centers } from './modals/calib-center-modal.js';
+import { calibrate_range } from './modals/calib-range-modal.js';
+// --- (تعديل) ---
+// استيراد الواجهة الجديدة بدلاً من الاعتماد على `navigator.hid`
+import { hidInterface } from './hid-bridge.js';
+// --- (نهاية التعديل) ---
+
+
+// Application State - manages app-wide state and UI
+const app = {
+  // Button disable state management
   disable_btn: 0,
   last_disable_btn: 0,
 
@@ -34,7 +54,7 @@ const app = {
 const ll_data = new Array(CIRCULARITY_DATA_SIZE);
 const rr_data = new Array(CIRCULARITY_DATA_SIZE);
 
-let controller = null;
+var controller = null; // تعريف المتغير خارج الدالة ليصبح عاماً في هذا الموديول
 
 function gboot() {
   app.gu = crypto.randomUUID();
@@ -100,6 +120,9 @@ function gboot() {
 
     await loadAllTemplates();
 
+    // Initialize controller manager immediately
+    controller = initControllerManager({ handleNvStatusUpdate });
+
     initAnalyticsApi(app); // init just with gu for now
     lang_init(app, handleLanguageChange, show_welcome_modal);
 
@@ -109,6 +132,23 @@ function gboot() {
     $('#edgeModalDontShowAgain').on('change', function() {
       localStorage.setItem('edgeModalDontShowAgain', this.checked.toString());
     });
+
+    // --- (تعديل) ---
+    // التحقق من دعم الواجهة (سواء WebHID أو AndroidBridge)
+    if (!hidInterface) {
+        $("#offlinebar").hide();
+        $("#onlinebar").hide();
+        $("#missinghid").show();
+        return;
+    }
+    
+    // إخفاء التحذيرات لأننا ندعم أحد الطريقتين
+    $("#offlinebar").show();
+    $("#missinghid").hide();
+    
+    // تسجيل دالة فصل الاتصال
+    hidInterface.onDisconnect(handleDisconnectedDevice);
+    // --- (نهاية التعديل) ---
   }
 
   // Since modules are deferred, DOM might already be loaded
@@ -118,7 +158,9 @@ function gboot() {
     // DOM is already loaded, run immediately
     initializeApp();
   }
-
+  
+  /* // --- (تعديل) ---
+  // تم نقل هذا اللوجيك إلى initializeApp
   if (!("hid" in navigator)) {
     $("#offlinebar").hide();
     $("#onlinebar").hide();
@@ -128,14 +170,15 @@ function gboot() {
 
   $("#offlinebar").show();
   navigator.hid.addEventListener("disconnect", handleDisconnectedDevice);
+  // --- (نهاية التعديل) ---
+  */
 }
 
 async function connect() {
   app.gj = crypto.randomUUID();
   initAnalyticsApi(app); // init with gu and jg
 
-  // Initialize controller manager with translation function
-  controller = initControllerManager({ handleNvStatusUpdate });
+  // controller = initControllerManager({ handleNvStatusUpdate }); // تم نقلها إلى gboot
   controller.setInputHandler(handleControllerInput);
 
   la("begin");
@@ -150,10 +193,15 @@ async function connect() {
 
     const supportedModels = ControllerFactory.getSupportedModels();
     const requestParams = { filters: supportedModels };
-    let devices = await navigator.hid.getDevices(); // Already connected?
+    
+    // --- (تعديل) ---
+    // استخدام الواجهة الجديدة بدلاً من `navigator.hid`
+    let devices = await hidInterface.getDevices(); // Already connected?
     if (devices.length == 0) {
-      devices = await navigator.hid.requestDevice(requestParams);
+      devices = await hidInterface.requestDevice(requestParams);
     }
+    // --- (نهاية التعديل) ---
+    
     if (devices.length == 0) {
       $("#btnconnect").prop("disabled", false);
       $("#connectspinner").hide();
@@ -196,7 +244,12 @@ async function continue_connection({data, device}) {
 
     // Detect if the controller is connected via USB
     const reportLen = data.byteLength;
-    if(reportLen != 63) {
+    
+    // --- (تعديل) ---
+    // WebHID (ديسكتوب) يرسل 63 بايت. تطبيق الأندرويد قد يرسل 64 بايت (مع الـ Report ID)
+    // لذلك سنتحقق من أن الطول أكبر من 62
+    if(reportLen < 63) {
+    // --- (نهاية التعديل) ---
       // throw new Error(l("Please connect the device using a USB cable."));
       infoAlert(l("The device is connected via Bluetooth. Disconnect and reconnect using a USB cable instead."));
       await disconnect();
